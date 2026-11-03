@@ -1,0 +1,9 @@
+[package]
+name = "voxel-engine-cpu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glam = "0.34.2"
+minifb = "0.29.0"
+wide = "1.7.1"
