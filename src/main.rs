@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use glam::{Vec3, vec3};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 
@@ -39,8 +41,12 @@ fn hit_sphere(center: Vec3, radius: f32, ray: &Ray) -> f32 {
     }
 }
 
+#[derive(Debug)]
 struct Camera {
     origin: Vec3,
+    target: Vec3,
+    fov_y: f32,
+    aspect_ratio: f32,
     #[allow(unused)]
     forward: Vec3,
     #[allow(unused)]
@@ -54,33 +60,42 @@ struct Camera {
 
 impl Camera {
     fn new(position: Vec3, target: Vec3, fov_y: f32, aspect_ratio: f32) -> Self {
-        let forward = (target - position).normalize();
-        let right = forward.cross(Vec3::Y).normalize();
-        let up = right.cross(forward).normalize();
+        let mut camera = Camera {
+            origin: position,
+            target,
+            fov_y,
+            aspect_ratio,
+            forward: Vec3::ZERO,
+            right: Vec3::ZERO,
+            up: Vec3::ZERO,
+            pixel_delta_u: Vec3::ZERO,
+            pixel_delta_v: Vec3::ZERO,
+            pixel00_loc: Vec3::ZERO,
+        };
 
-        let viewport_height = 2.0 * (fov_y * 0.5).tan();
-        let viewport_width = viewport_height * aspect_ratio;
+        camera.update();
+
+        camera
+    }
+
+    fn update(&mut self) {
+        self.forward = (self.target - self.origin).normalize();
+        self.right = self.forward.cross(Vec3::Y).normalize();
+        self.up = self.right.cross(self.forward).normalize();
+
+        let viewport_height = 2.0 * (self.fov_y * 0.5).tan();
+        let viewport_width = viewport_height * self.aspect_ratio;
         let focal_length = 1.0;
 
-        let viewport_u = right * viewport_width;
-        let viewport_v = up * -viewport_height;
+        let viewport_u = self.right * viewport_width;
+        let viewport_v = self.up * -viewport_height;
 
-        let pixel_delta_u = viewport_u / WIDTH as f32;
-        let pixel_delta_v = viewport_v / HEIGHT as f32;
+        self.pixel_delta_u = viewport_u / WIDTH as f32;
+        self.pixel_delta_v = viewport_v / HEIGHT as f32;
 
         let viewport_upper_left =
-            position + forward * focal_length - viewport_u * 0.5 - viewport_v * 0.5;
-        let pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
-
-        Self {
-            origin: position,
-            forward,
-            right,
-            up,
-            pixel_delta_u,
-            pixel_delta_v,
-            pixel00_loc,
-        }
+            self.origin + self.forward * focal_length - viewport_u * 0.5 - viewport_v * 0.5;
+        self.pixel00_loc = viewport_upper_left + 0.5 * (self.pixel_delta_u + self.pixel_delta_v);
     }
 
     fn ray_for_pixel(&self, x: usize, y: usize) -> Ray {
@@ -109,14 +124,43 @@ fn main() {
 
     window.set_target_fps(60);
 
-    let camera = Camera::new(
+    let mut time_since_last_fps = SystemTime::now();
+
+    let mut camera = Camera::new(
+        vec3(0.0, 0.0, 1.0),
         vec3(0.0, 0.0, 0.0),
-        vec3(0.0, 0.0, -1.0),
         90.0_f32.to_radians(),
         WIDTH as f32 / HEIGHT as f32,
     );
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        let mut rot_y = 0.0f32;
+        let mut fwd = 0.0f32;
+
+        window.get_keys().iter().for_each(|key| match key {
+            Key::W => fwd += 0.01,
+            Key::S => fwd -= 0.01,
+            Key::A => rot_y -= 0.1,
+            Key::D => rot_y += 0.1,
+            _ => (),
+        });
+
+        // Move camera along its forward axis
+        camera.origin += camera.forward * fwd;
+
+        // Rotate camera around target on Y axis
+        let mut pos = camera.origin - camera.target;
+        pos = vec3(
+            pos.x * rot_y.cos() + pos.z * rot_y.sin(),
+            pos.y,
+            -pos.x * rot_y.sin() + pos.z * rot_y.cos(),
+        );
+        camera.origin = pos + camera.target;
+
+        camera.update();
+
+        // dbg!(&camera);
+
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
                 let pixel_index = y * WIDTH + x;
@@ -125,7 +169,7 @@ fn main() {
                 let grad = 0.5 * ray.direction.y + 1.0;
                 let mut color = (1.0 - grad) * vec3(1.0, 1.0, 1.0) + grad * vec3(0.5, 0.7, 1.0);
 
-                let sphere_center = vec3(0.0, 0.0, -1.0);
+                let sphere_center = vec3(0.0, 0.0, 0.0);
                 let t = hit_sphere(sphere_center, 0.5, &ray);
                 if t > 0.0 {
                     let n = (ray.at(t) - sphere_center).normalize();
@@ -137,5 +181,10 @@ fn main() {
         }
 
         window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
+
+        if time_since_last_fps.elapsed().unwrap().as_millis() >= 1000 {
+            println!("fps: {}", window.get_fps());
+            time_since_last_fps = SystemTime::now();
+        }
     }
 }
