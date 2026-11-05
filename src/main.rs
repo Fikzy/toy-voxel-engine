@@ -21,7 +21,7 @@ impl Ray {
         Self { origin, direction }
     }
 
-    fn at(self, t: f32) -> Vec3 {
+    fn at(&self, t: f32) -> Vec3 {
         self.origin + t * self.direction
     }
 }
@@ -39,6 +39,23 @@ fn hit_sphere(center: Vec3, radius: f32, ray: &Ray) -> f32 {
     } else {
         (h - discriminant.sqrt()) / a
     }
+}
+
+fn hit_cube(min: Vec3, max: Vec3, ray: &Ray) -> (f32, f32) {
+    let dir_inv = 1.0 / ray.direction;
+
+    let mut tmin = 0.0f32;
+    let mut tmax = f32::MAX;
+
+    for i in 0..3 {
+        let t1 = (min.to_array()[i] - ray.origin.to_array()[i]) * dir_inv.to_array()[i];
+        let t2 = (max.to_array()[i] - ray.origin.to_array()[i]) * dir_inv.to_array()[i];
+
+        tmin = tmin.max(t1.min(t2).min(tmax)); // max(tmin, min(min(t1, t2), tmax));
+        tmax = tmax.min(t1.max(t2).max(tmin)); // min(tmax, max(max(t1, t2), tmin));
+    }
+
+    (tmin, tmax)
 }
 
 #[derive(Debug)]
@@ -169,11 +186,20 @@ fn main() {
                 let grad = 0.5 * ray.direction.y + 1.0;
                 let mut color = (1.0 - grad) * vec3(1.0, 1.0, 1.0) + grad * vec3(0.5, 0.7, 1.0);
 
-                let sphere_center = vec3(0.0, 0.0, 0.0);
+                let sphere_center = vec3(-0.5, 0.0, 0.0);
                 let t = hit_sphere(sphere_center, 0.5, &ray);
                 if t > 0.0 {
                     let n = (ray.at(t) - sphere_center).normalize();
                     color = 0.5 * vec3(n.x + 1.0, n.y + 1.0, n.z + 1.0);
+                }
+
+                let cube_center = vec3(0.5, 0.0, 0.0);
+                let cube_min = cube_center + vec3(-0.33, -0.33, -0.33);
+                let cube_max = cube_center + vec3(0.33, 0.33, 0.33);
+                let (tmin, tmax) = hit_cube(cube_min, cube_max, &ray);
+                if tmin < tmax {
+                    // let n = ...?
+                    color = vec3(1.0, 0.0, 0.0);
                 }
 
                 buffer[pixel_index] = from_f32_rgb(color.x, color.y, color.z);
