@@ -1,4 +1,4 @@
-use glam::{Vec3, usizevec2, vec3};
+use glam::{Vec3, vec3};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 
 const WIDTH: usize = 320;
@@ -16,7 +16,7 @@ struct Ray {
 
 impl Ray {
     fn new(origin: Vec3, direction: Vec3) -> Ray {
-        Ray { origin, direction }
+        Self { origin, direction }
     }
 
     fn at(self, t: f32) -> Vec3 {
@@ -39,6 +39,58 @@ fn hit_sphere(center: Vec3, radius: f32, ray: &Ray) -> f32 {
     }
 }
 
+struct Camera {
+    origin: Vec3,
+    #[allow(unused)]
+    forward: Vec3,
+    #[allow(unused)]
+    right: Vec3,
+    #[allow(unused)]
+    up: Vec3,
+    pixel_delta_u: Vec3,
+    pixel_delta_v: Vec3,
+    pixel00_loc: Vec3,
+}
+
+impl Camera {
+    fn new(position: Vec3, target: Vec3, fov_y: f32, aspect_ratio: f32) -> Self {
+        let forward = (target - position).normalize();
+        let right = forward.cross(Vec3::Y).normalize();
+        let up = right.cross(forward).normalize();
+
+        let viewport_height = 2.0 * (fov_y * 0.5).tan();
+        let viewport_width = viewport_height * aspect_ratio;
+        let focal_length = 1.0;
+
+        let viewport_u = right * viewport_width;
+        let viewport_v = up * -viewport_height;
+
+        let pixel_delta_u = viewport_u / WIDTH as f32;
+        let pixel_delta_v = viewport_v / HEIGHT as f32;
+
+        let viewport_upper_left =
+            position + forward * focal_length - viewport_u * 0.5 - viewport_v * 0.5;
+        let pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
+
+        Self {
+            origin: position,
+            forward,
+            right,
+            up,
+            pixel_delta_u,
+            pixel_delta_v,
+            pixel00_loc,
+        }
+    }
+
+    fn ray_for_pixel(&self, x: usize, y: usize) -> Ray {
+        let pixel_center =
+            self.pixel00_loc + x as f32 * self.pixel_delta_u + y as f32 * self.pixel_delta_v;
+        let direction = (pixel_center - self.origin).normalize();
+        Ray::new(self.origin, direction)
+    }
+}
+
 fn main() {
     let mut buffer = vec![0u32; WIDTH * HEIGHT];
 
@@ -55,59 +107,35 @@ fn main() {
     )
     .expect("Unable to create the window");
 
-    window.set_target_fps(30);
+    window.set_target_fps(60);
 
-    let window_size = usizevec2(WIDTH, HEIGHT);
-
-    // Camera
-    let focal_length = 1.0f32;
-    let viewport_height = 2.0f32;
-    let viewport_width = viewport_height * window_size.x as f32 / window_size.y as f32;
-    let camera_center = vec3(0.0, 0.0, 0.0);
-
-    // println!("{} {}", viewport_width, viewport_height);
-
-    let viewport_u = vec3(viewport_width, 0.0, 0.0);
-    let viewport_v = vec3(0.0, -viewport_height, 0.0);
-
-    let pixel_delta_u = viewport_u / window_size.x as f32;
-    let pixel_delta_v = viewport_v / window_size.y as f32;
-
-    let viewport_upper_left =
-        camera_center - vec3(0.0, 0.0, focal_length) - viewport_u / 2.0 - viewport_v / 2.0;
-    let pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
+    let camera = Camera::new(
+        vec3(0.0, 0.0, 0.0),
+        vec3(0.0, 0.0, -1.0),
+        90.0_f32.to_radians(),
+        WIDTH as f32 / HEIGHT as f32,
+    );
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        let mut x = 0;
-        let mut y = 0;
-        for pixel in buffer.iter_mut() {
-            let pixel_center =
-                pixel00_loc + (x as f32 * pixel_delta_u) + (y as f32 * pixel_delta_v);
-            let ray_direction = (pixel_center - camera_center).normalize();
-            let ray = Ray::new(camera_center, ray_direction);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let pixel_index = y * WIDTH + x;
+                let ray = camera.ray_for_pixel(x, y);
 
-            let grad = 0.5 * ray.direction.y + 1.0;
-            let mut color = (1.0 - grad) * vec3(1.0, 1.0, 1.0) + grad * vec3(0.5, 0.7, 1.0);
+                let grad = 0.5 * ray.direction.y + 1.0;
+                let mut color = (1.0 - grad) * vec3(1.0, 1.0, 1.0) + grad * vec3(0.5, 0.7, 1.0);
 
-            let sphere_center = vec3(0.0, 0.0, -1.0);
-            let t = hit_sphere(sphere_center, 0.5, &ray);
-            if t > 0.0 {
-                let n = (ray.at(t) - sphere_center).normalize();
-                color = 0.5 * vec3(n.x + 1.0, n.y + 1.0, n.z + 1.0);
-            }
+                let sphere_center = vec3(0.0, 0.0, -1.0);
+                let t = hit_sphere(sphere_center, 0.5, &ray);
+                if t > 0.0 {
+                    let n = (ray.at(t) - sphere_center).normalize();
+                    color = 0.5 * vec3(n.x + 1.0, n.y + 1.0, n.z + 1.0);
+                }
 
-            *pixel = from_f32_rgb(color.x, color.y, color.z);
-
-            if x >= window_size.x - 1 {
-                x = 0;
-                y += 1;
-            } else {
-                x += 1;
+                buffer[pixel_index] = from_f32_rgb(color.x, color.y, color.z);
             }
         }
 
-        window
-            .update_with_buffer(&buffer, window_size.x, window_size.y)
-            .unwrap();
+        window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
     }
 }
