@@ -2,6 +2,7 @@ use std::time::SystemTime;
 
 use glam::{Vec3, vec3};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
+use wide::{f32x16, i32x16, u32x16};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
@@ -176,33 +177,72 @@ fn main() {
 
         camera.update();
 
-        // dbg!(&camera);
+        let pixel00_loc_x = f32x16::splat(camera.pixel00_loc.x);
+        let pixel00_loc_y = f32x16::splat(camera.pixel00_loc.y);
+        let pixel00_loc_z = f32x16::splat(camera.pixel00_loc.z);
 
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let pixel_index = y * WIDTH + x;
-                let ray = camera.ray_for_pixel(x, y);
+        let delta_ux = f32x16::splat(camera.pixel_delta_u.x);
+        let delta_uy = f32x16::splat(camera.pixel_delta_u.y);
+        let delta_uz = f32x16::splat(camera.pixel_delta_u.z);
 
-                let grad = 0.5 * ray.direction.y + 1.0;
-                let mut color = (1.0 - grad) * vec3(1.0, 1.0, 1.0) + grad * vec3(0.5, 0.7, 1.0);
+        let delta_vx = f32x16::splat(camera.pixel_delta_v.x);
+        let delta_vy = f32x16::splat(camera.pixel_delta_v.y);
+        let delta_vz = f32x16::splat(camera.pixel_delta_v.z);
 
-                let sphere_center = vec3(-0.5, 0.0, 0.0);
-                let t = hit_sphere(sphere_center, 0.5, &ray);
-                if t > 0.0 {
-                    let n = (ray.at(t) - sphere_center).normalize();
-                    color = 0.5 * vec3(n.x + 1.0, n.y + 1.0, n.z + 1.0);
+        let origin_x = f32x16::splat(camera.origin.x);
+        let origin_y = f32x16::splat(camera.origin.y);
+        let origin_z = f32x16::splat(camera.origin.z);
+
+        let local_x = i32x16::new([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
+        let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
+
+        // Process image in blocks of 4x4 pixels
+        for chunk_y in 0..(HEIGHT / 4) {
+            for chunk_x in 0..(WIDTH / 4) {
+                let x = i32x16::splat((chunk_x as i32) * 4) + local_x;
+                let y = i32x16::splat((chunk_y as i32) * 4) + local_y;
+
+                let x_f32 = f32x16::from_i32x16(x);
+                let y_f32 = f32x16::from_i32x16(y);
+
+                let pixel_center_x = pixel00_loc_x + (x_f32 * delta_ux) + (y_f32 * delta_vx);
+                let pixel_center_y = pixel00_loc_y + (x_f32 * delta_uy) + (y_f32 * delta_vy);
+                let pixel_center_z = pixel00_loc_z + (x_f32 * delta_uz) + (y_f32 * delta_vz);
+
+                let ray_direction_diff_x = pixel_center_x - origin_x;
+                let ray_direction_diff_y = pixel_center_y - origin_y;
+                let ray_direction_diff_z = pixel_center_z - origin_z;
+
+                let norm = (ray_direction_diff_x * ray_direction_diff_x
+                    + ray_direction_diff_y * ray_direction_diff_y
+                    + ray_direction_diff_z * ray_direction_diff_z)
+                    .sqrt();
+
+                let ray_direction_x = ray_direction_diff_x / norm;
+                let ray_direction_y = ray_direction_diff_y / norm;
+                let ray_direction_z = ray_direction_diff_z / norm;
+
+                let grad = 0.5 * ray_direction_y + 1.0;
+
+                let color_r = (1.0 - grad) * 1.0 + grad * 0.5;
+                let color_g = (1.0 - grad) * 1.0 + grad * 0.7;
+                let color_b = (1.0 - grad) * 1.0 + grad * 1.0;
+
+                let color_r_int: u32x16 = bytemuck::cast((color_r * 255.0f32).fast_round_int());
+                let color_g_int: u32x16 = bytemuck::cast((color_g * 255.0f32).fast_round_int());
+                let color_b_int: u32x16 = bytemuck::cast((color_b * 255.0f32).fast_round_int());
+
+                // Encode rgb color to single u32 (0RGB format)
+                let color: u32x16 = (color_r_int << 16) | (color_g_int << 8) | color_b_int;
+
+                let color_array: [u32; 16] = color.into();
+
+                for i in 0..4 {
+                    let dst_index = (chunk_y * 4 + i) * WIDTH + chunk_x * 4;
+                    let src_index = i * 4;
+                    buffer[dst_index..(dst_index + 4)]
+                        .copy_from_slice(&color_array[src_index..(src_index + 4)]);
                 }
-
-                let cube_center = vec3(0.5, 0.0, 0.0);
-                let cube_min = cube_center + vec3(-0.33, -0.33, -0.33);
-                let cube_max = cube_center + vec3(0.33, 0.33, 0.33);
-                let (tmin, tmax) = hit_cube(cube_min, cube_max, &ray);
-                if tmin < tmax {
-                    // let n = ...?
-                    color = vec3(1.0, 0.0, 0.0);
-                }
-
-                buffer[pixel_index] = from_f32_rgb(color.x, color.y, color.z);
             }
         }
 
