@@ -1,8 +1,12 @@
+pub mod vec3simd;
+
 use std::time::SystemTime;
 
 use glam::{Vec3, vec3};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 use wide::{f32x16, i32x16, u32x16};
+
+use crate::vec3simd::Vec3Simd;
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
@@ -151,6 +155,8 @@ fn main() {
         WIDTH as f32 / HEIGHT as f32,
     );
 
+    let background_color = vec3(0.5, 0.7, 1.0);
+
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let mut rot_y = 0.0f32;
         let mut fwd = 0.0f32;
@@ -177,21 +183,12 @@ fn main() {
 
         camera.update();
 
-        let pixel00_loc_x = f32x16::splat(camera.pixel00_loc.x);
-        let pixel00_loc_y = f32x16::splat(camera.pixel00_loc.y);
-        let pixel00_loc_z = f32x16::splat(camera.pixel00_loc.z);
+        let pixe00_loc = Vec3Simd::<f32x16>::from(camera.pixel00_loc);
+        let delta_u = Vec3Simd::<f32x16>::from(camera.pixel_delta_u);
+        let delta_v = Vec3Simd::<f32x16>::from(camera.pixel_delta_v);
+        let origin = Vec3Simd::<f32x16>::from(camera.origin);
 
-        let delta_ux = f32x16::splat(camera.pixel_delta_u.x);
-        let delta_uy = f32x16::splat(camera.pixel_delta_u.y);
-        let delta_uz = f32x16::splat(camera.pixel_delta_u.z);
-
-        let delta_vx = f32x16::splat(camera.pixel_delta_v.x);
-        let delta_vy = f32x16::splat(camera.pixel_delta_v.y);
-        let delta_vz = f32x16::splat(camera.pixel_delta_v.z);
-
-        let origin_x = f32x16::splat(camera.origin.x);
-        let origin_y = f32x16::splat(camera.origin.y);
-        let origin_z = f32x16::splat(camera.origin.z);
+        let background = Vec3Simd::<f32x16>::from(background_color);
 
         let local_x = i32x16::new([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
         let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
@@ -205,32 +202,17 @@ fn main() {
                 let x_f32 = f32x16::from_i32x16(x);
                 let y_f32 = f32x16::from_i32x16(y);
 
-                let pixel_center_x = pixel00_loc_x + (x_f32 * delta_ux) + (y_f32 * delta_vx);
-                let pixel_center_y = pixel00_loc_y + (x_f32 * delta_uy) + (y_f32 * delta_vy);
-                let pixel_center_z = pixel00_loc_z + (x_f32 * delta_uz) + (y_f32 * delta_vz);
+                let pixel_center = pixe00_loc + x_f32 * delta_u + y_f32 * delta_v;
 
-                let ray_direction_diff_x = pixel_center_x - origin_x;
-                let ray_direction_diff_y = pixel_center_y - origin_y;
-                let ray_direction_diff_z = pixel_center_z - origin_z;
+                let ray_direction = (pixel_center - origin).normalize();
 
-                let norm = (ray_direction_diff_x * ray_direction_diff_x
-                    + ray_direction_diff_y * ray_direction_diff_y
-                    + ray_direction_diff_z * ray_direction_diff_z)
-                    .sqrt();
+                let grad = 0.5 * ray_direction.y + 1.0;
 
-                let ray_direction_x = ray_direction_diff_x / norm;
-                let ray_direction_y = ray_direction_diff_y / norm;
-                let ray_direction_z = ray_direction_diff_z / norm;
+                let color = (1.0 - grad) * 1.0 + grad * background;
 
-                let grad = 0.5 * ray_direction_y + 1.0;
-
-                let color_r = (1.0 - grad) * 1.0 + grad * 0.5;
-                let color_g = (1.0 - grad) * 1.0 + grad * 0.7;
-                let color_b = (1.0 - grad) * 1.0 + grad * 1.0;
-
-                let color_r_int: u32x16 = bytemuck::cast((color_r * 255.0f32).fast_round_int());
-                let color_g_int: u32x16 = bytemuck::cast((color_g * 255.0f32).fast_round_int());
-                let color_b_int: u32x16 = bytemuck::cast((color_b * 255.0f32).fast_round_int());
+                let color_r_int: u32x16 = bytemuck::cast((color.x * 255.0f32).fast_round_int());
+                let color_g_int: u32x16 = bytemuck::cast((color.y * 255.0f32).fast_round_int());
+                let color_b_int: u32x16 = bytemuck::cast((color.z * 255.0f32).fast_round_int());
 
                 // Encode rgb color to single u32 (0RGB format)
                 let color: u32x16 = (color_r_int << 16) | (color_g_int << 8) | color_b_int;
