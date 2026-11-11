@@ -6,17 +6,17 @@ use glam::{Vec3, vec3};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 use wide::{f32x16, i32x16, u32x16};
 
-use crate::vec3simd::{FloatSimd, Vec3Simd};
+use crate::vec3simd::Vec3Simd;
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
 
 fn hit_sphere(
     center: Vec3Simd,
-    radius: FloatSimd,
+    radius: f32x16,
     ray_origin: Vec3Simd,
     ray_direction: Vec3Simd,
-) -> FloatSimd {
+) -> f32x16 {
     let oc = center - ray_origin;
 
     let a = ray_direction.length_squared();
@@ -26,17 +26,18 @@ fn hit_sphere(
 
     discriminant
         .is_sign_negative()
-        .bitselect(FloatSimd::splat(-1.0), (h - discriminant.sqrt()) / a)
+        .bitselect(f32x16::splat(-1.0), (h - discriminant.sqrt()) / a)
 }
 
+#[allow(unused)]
 fn hit_cube(
     min: Vec3Simd,
     max: Vec3Simd,
     ray_origin: Vec3Simd,
     inv_ray_direction: Vec3Simd,
-) -> (FloatSimd, FloatSimd) {
-    let mut tmin = FloatSimd::splat(0.0);
-    let mut tmax = FloatSimd::splat(f32::MAX);
+) -> (f32x16, f32x16) {
+    let mut tmin = f32x16::splat(0.0);
+    let mut tmax = f32x16::splat(f32::MAX);
 
     for i in 0..3 {
         let ray_origin_componenent = ray_origin.component(i);
@@ -49,6 +50,40 @@ fn hit_cube(
     }
 
     (tmin, tmax)
+}
+
+fn hit_cube_with_normal(
+    min: Vec3Simd,
+    max: Vec3Simd,
+    ray_origin: Vec3Simd,
+    inv_ray_direction: Vec3Simd,
+) -> (f32x16, f32x16, i32x16) {
+    // Use NEG_INFINITY so the first valid t_near always wins an axis
+    let mut tmin = f32x16::splat(f32::NEG_INFINITY);
+    let mut tmax = f32x16::splat(f32::MAX);
+    let mut hit_axis = i32x16::splat(0);
+
+    for i in 0..3 {
+        let ray_origin_componenent = ray_origin.component(i);
+        let dir_inv_component = inv_ray_direction.component(i);
+        let t1 = (min.component(i) - ray_origin_componenent) * dir_inv_component;
+        let t2 = (max.component(i) - ray_origin_componenent) * dir_inv_component;
+
+        let t_near = t1.min(t2);
+        let t_far = t1.max(t2);
+
+        // Identify lanes where this axis becomes the new latest entry
+        let is_new_max = t_near.simd_gt(tmin);
+
+        tmin = is_new_max.select(t_near, tmin);
+        hit_axis = is_new_max.select(i32x16::splat(i as i32), hit_axis);
+        tmax = tmax.min(t_far);
+    }
+
+    // Clamp tmin to 0.0 after axis tracking so forward-hit checks stay identical
+    tmin = tmin.max(f32x16::splat(0.0));
+
+    (tmin, tmax, hit_axis)
 }
 
 #[derive(Debug)]
@@ -144,7 +179,6 @@ fn main() {
     let cube_center = Vec3Simd::from(vec3(0.5, 0.0, 0.0));
     let cube_min = cube_center + Vec3Simd::from(vec3(-0.33, -0.33, -0.33));
     let cube_max = cube_center + Vec3Simd::from(vec3(0.33, 0.33, 0.33));
-    let cube_color = Vec3Simd::from(vec3(1.0, 0.0, 0.0));
 
     let local_x = i32x16::new([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
     let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
@@ -189,13 +223,13 @@ fn main() {
                     + y_f32 * Vec3Simd::from(camera.pixel_delta_v);
 
                 let ray_direction = (pixel_center - Vec3Simd::from(camera.origin)).normalize();
-                let inv_ray_direction = FloatSimd::splat(1.0) / ray_direction;
+                let inv_ray_direction = f32x16::splat(1.0) / ray_direction;
 
                 let grad = 0.5 * ray_direction.y + 1.0;
 
                 let mut color = (1.0 - grad) * 1.0 + grad * background_color;
 
-                let mut closest_t = FloatSimd::splat(f32::MAX);
+                let mut closest_t = f32x16::splat(f32::MAX);
 
                 // Sphere
                 let t = hit_sphere(
@@ -204,30 +238,35 @@ fn main() {
                     Vec3Simd::from(camera.origin),
                     ray_direction,
                 );
-                let n =
+                let sphere_hit_normal =
                     (Vec3Simd::from(camera.origin) + ray_direction * t - sphere_center).normalize();
                 color = Vec3Simd::bitselect_scalar(
                     t.is_sign_positive(),
-                    FloatSimd::splat(0.5) * (n + FloatSimd::splat(1.0)),
+                    f32x16::splat(0.5) * (sphere_hit_normal + f32x16::splat(1.0)),
                     color,
                 );
 
                 closest_t = t.is_sign_positive().bitselect(t, closest_t);
 
                 // Cube
-                let (tmin, tmax) = hit_cube(
+                let (tmin, tmax, hit_axis) = hit_cube_with_normal(
                     cube_min,
                     cube_max,
                     Vec3Simd::from(camera.origin),
                     inv_ray_direction,
                 );
+                let cube_hit_normal = Vec3Simd::new(
+                    -ray_direction.x.signum() * hit_axis.simd_eq(i32x16::splat(0)).round_float(),
+                    -ray_direction.y.signum() * hit_axis.simd_eq(i32x16::splat(1)).round_float(),
+                    -ray_direction.z.signum() * hit_axis.simd_eq(i32x16::splat(2)).round_float(),
+                );
                 color = Vec3Simd::bitselect_scalar(
-                    tmin.simd_lt(tmax) & tmin.simd_lt(closest_t),
-                    cube_color,
+                    tmin.simd_lt(closest_t) & tmin.simd_le(tmax) & tmax.is_sign_positive(),
+                    f32x16::splat(0.5) * (cube_hit_normal + f32x16::splat(1.0)),
                     color,
                 );
 
-                color.clamp_scalar(FloatSimd::splat(0.0), FloatSimd::splat(1.0));
+                color.clamp_scalar(f32x16::splat(0.0), f32x16::splat(1.0));
 
                 let color_r_int: u32x16 = bytemuck::cast((color.x * 255.0f32).fast_round_int());
                 let color_g_int: u32x16 = bytemuck::cast((color.y * 255.0f32).fast_round_int());
