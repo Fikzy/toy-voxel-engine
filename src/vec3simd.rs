@@ -50,7 +50,7 @@ impl Vec3Simd {
     }
 
     #[inline]
-    pub fn select(mask: FloatSimd, if_true: Self, if_false: Self) -> Self {
+    pub fn select_scalar(mask: FloatSimd, if_true: Self, if_false: Self) -> Self {
         Self::new(
             mask.select(if_true.x, if_false.x),
             mask.select(if_true.y, if_false.y),
@@ -59,11 +59,20 @@ impl Vec3Simd {
     }
 
     #[inline]
-    pub fn bitselect(mask: FloatSimd, if_true: Self, if_false: Self) -> Self {
+    pub fn bitselect_scalar(mask: FloatSimd, if_true: Self, if_false: Self) -> Self {
         Self::new(
             mask.bitselect(if_true.x, if_false.x),
             mask.bitselect(if_true.y, if_false.y),
             mask.bitselect(if_true.z, if_false.z),
+        )
+    }
+
+    #[inline]
+    pub fn clamp_scalar(self, min: FloatSimd, max: FloatSimd) -> Self {
+        Self::new(
+            self.x.clamp(min, max),
+            self.y.clamp(min, max),
+            self.z.clamp(min, max),
         )
     }
 
@@ -78,7 +87,7 @@ impl Vec3Simd {
             0 => self.x,
             1 => self.y,
             2 => self.z,
-            _ => panic!("Out of bounds")
+            _ => panic!("Out of bounds"),
         }
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "voxel-engine-cpu"
+name = "toy-voxel-engine"
 version = "0.1.0"
 edition = "2024"
 
