@@ -6,55 +6,45 @@ use glam::{Vec3, vec3};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 use wide::{f32x16, i32x16, u32x16};
 
-use crate::vec3simd::Vec3Simd;
+use crate::vec3simd::{FloatSimd, Vec3Simd};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
 
-fn from_f32_rgb(r: f32, g: f32, b: f32) -> u32 {
-    let (r, g, b) = ((r * 255.0) as u32, (g * 255.0) as u32, (b * 255.0) as u32);
-    (r << 16) | (g << 8) | b
-}
+fn hit_sphere(
+    center: Vec3Simd,
+    radius: FloatSimd,
+    ray_origin: Vec3Simd,
+    ray_direction: Vec3Simd,
+) -> FloatSimd {
+    let oc = center - ray_origin;
 
-struct Ray {
-    origin: Vec3,
-    direction: Vec3,
-}
-
-impl Ray {
-    fn new(origin: Vec3, direction: Vec3) -> Ray {
-        Self { origin, direction }
-    }
-
-    fn at(&self, t: f32) -> Vec3 {
-        self.origin + t * self.direction
-    }
-}
-
-fn hit_sphere(center: Vec3, radius: f32, ray: &Ray) -> f32 {
-    let oc = center - ray.origin;
-
-    let a = ray.direction.length_squared();
-    let h = ray.direction.dot(oc);
+    let a = ray_direction.length_squared();
+    let h = ray_direction.dot(oc);
     let c = oc.length_squared() - radius * radius;
     let discriminant = h * h - a * c;
 
-    if discriminant < 0.0 {
-        -1.0
-    } else {
-        (h - discriminant.sqrt()) / a
-    }
+    discriminant
+        .is_sign_negative()
+        .bitselect(discriminant, (h - discriminant.sqrt()) / a)
 }
 
-fn hit_cube(min: Vec3, max: Vec3, ray: &Ray) -> (f32, f32) {
-    let dir_inv = 1.0 / ray.direction;
+fn hit_cube(
+    min: Vec3Simd,
+    max: Vec3Simd,
+    ray_origin: Vec3Simd,
+    ray_direction: Vec3Simd,
+) -> (FloatSimd, FloatSimd) {
+    let dir_inv = FloatSimd::splat(1.0) / ray_direction;
 
-    let mut tmin = 0.0f32;
-    let mut tmax = f32::MAX;
+    let mut tmin = FloatSimd::splat(0.0);
+    let mut tmax = FloatSimd::splat(f32::MAX);
 
     for i in 0..3 {
-        let t1 = (min.to_array()[i] - ray.origin.to_array()[i]) * dir_inv.to_array()[i];
-        let t2 = (max.to_array()[i] - ray.origin.to_array()[i]) * dir_inv.to_array()[i];
+        let ray_origin_componenent = ray_origin.component(i);
+        let dir_inv_component = dir_inv.component(i);
+        let t1 = (min.component(i) - ray_origin_componenent) * dir_inv_component;
+        let t2 = (max.component(i) - ray_origin_componenent) * dir_inv_component;
 
         tmin = tmin.max(t1.min(t2).min(tmax)); // max(tmin, min(min(t1, t2), tmax));
         tmax = tmax.min(t1.max(t2).max(tmin)); // min(tmax, max(max(t1, t2), tmin));
@@ -119,20 +109,13 @@ impl Camera {
             self.origin + self.forward * focal_length - viewport_u * 0.5 - viewport_v * 0.5;
         self.pixel00_loc = viewport_upper_left + 0.5 * (self.pixel_delta_u + self.pixel_delta_v);
     }
-
-    fn ray_for_pixel(&self, x: usize, y: usize) -> Ray {
-        let pixel_center =
-            self.pixel00_loc + x as f32 * self.pixel_delta_u + y as f32 * self.pixel_delta_v;
-        let direction = (pixel_center - self.origin).normalize();
-        Ray::new(self.origin, direction)
-    }
 }
 
 fn main() {
     let mut buffer = vec![0u32; WIDTH * HEIGHT];
 
     let mut window = Window::new(
-        "Voxel Engine",
+        "Toy Voxel Engine",
         WIDTH,
         HEIGHT,
         WindowOptions {
@@ -155,7 +138,21 @@ fn main() {
         WIDTH as f32 / HEIGHT as f32,
     );
 
-    let background_color = vec3(0.5, 0.7, 1.0);
+    let background_color = Vec3Simd::from(vec3(0.5, 0.7, 1.0));
+
+    let sphere_center = Vec3Simd::from(vec3(-0.5, 0.0, 0.0));
+    let sphere_radius = f32x16::splat(0.5);
+
+    let cube_center = Vec3Simd::from(vec3(0.5, 0.0, 0.0));
+    let cube_min = cube_center + Vec3Simd::from(vec3(-0.33, -0.33, -0.33));
+    let cube_max = cube_center + Vec3Simd::from(vec3(0.33, 0.33, 0.33));
+    let cube_color = Vec3Simd::from(vec3(1.0, 0.0, 0.0));
+
+    let local_x = i32x16::new([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
+    let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
+
+    let zero_point_five = FloatSimd::splat(0.5);
+    let one = FloatSimd::splat(1.0);
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let mut rot_y = 0.0f32;
@@ -183,15 +180,10 @@ fn main() {
 
         camera.update();
 
-        let pixe00_loc = Vec3Simd::<f32x16>::from(camera.pixel00_loc);
-        let delta_u = Vec3Simd::<f32x16>::from(camera.pixel_delta_u);
-        let delta_v = Vec3Simd::<f32x16>::from(camera.pixel_delta_v);
-        let origin = Vec3Simd::<f32x16>::from(camera.origin);
-
-        let background = Vec3Simd::<f32x16>::from(background_color);
-
-        let local_x = i32x16::new([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
-        let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
+        let camera_pixe00_loc = Vec3Simd::from(camera.pixel00_loc);
+        let camera_delta_u = Vec3Simd::from(camera.pixel_delta_u);
+        let camera_delta_v = Vec3Simd::from(camera.pixel_delta_v);
+        let camera_origin = Vec3Simd::from(camera.origin);
 
         // Process image in blocks of 4x4 pixels
         for chunk_y in 0..(HEIGHT / 4) {
@@ -202,13 +194,24 @@ fn main() {
                 let x_f32 = f32x16::from_i32x16(x);
                 let y_f32 = f32x16::from_i32x16(y);
 
-                let pixel_center = pixe00_loc + x_f32 * delta_u + y_f32 * delta_v;
+                let pixel_center =
+                    camera_pixe00_loc + x_f32 * camera_delta_u + y_f32 * camera_delta_v;
 
-                let ray_direction = (pixel_center - origin).normalize();
+                let ray_direction = (pixel_center - camera_origin).normalize();
 
                 let grad = 0.5 * ray_direction.y + 1.0;
 
-                let color = (1.0 - grad) * 1.0 + grad * background;
+                let mut color = (1.0 - grad) * 1.0 + grad * background_color;
+
+                // Sphere
+                let t = hit_sphere(sphere_center, sphere_radius, camera_origin, ray_direction);
+                let n = (camera_origin + ray_direction * t - sphere_center).normalize();
+                color =
+                    Vec3Simd::bitselect(t.is_sign_positive(), zero_point_five * (n + one), color);
+
+                // Cube
+                let (tmin, tmax) = hit_cube(cube_min, cube_max, camera_origin, ray_direction);
+                color = Vec3Simd::bitselect(tmin.simd_lt(tmax), cube_color, color);
 
                 let color_r_int: u32x16 = bytemuck::cast((color.x * 255.0f32).fast_round_int());
                 let color_g_int: u32x16 = bytemuck::cast((color.y * 255.0f32).fast_round_int());

@@ -3,6 +3,10 @@ name = "voxel-engine-cpu"
 version = "0.1.0"
 edition = "2024"
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [dependencies]
 bytemuck = "1.25.2"
 glam = "0.34.2"
