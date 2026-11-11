@@ -186,25 +186,34 @@ fn main() {
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let mut rot_y = 0.0f32;
         let mut fwd = 0.0f32;
+        let mut rot_x = 0.0f32;
 
         window.get_keys().iter().for_each(|key| match key {
             Key::W => fwd += 0.01,
             Key::S => fwd -= 0.01,
             Key::A => rot_y -= 0.1,
             Key::D => rot_y += 0.1,
+            Key::Space => rot_x -= 0.1,
+            Key::LeftShift => rot_x += 0.1,
             _ => (),
         });
 
         // Move camera along its forward axis
         camera.origin += camera.forward * fwd;
 
-        // Rotate camera around target on Y axis
+        // Rotate camera around target
         let mut pos = camera.origin - camera.target;
-        pos = vec3(
-            pos.x * rot_y.cos() + pos.z * rot_y.sin(),
-            pos.y,
-            -pos.x * rot_y.sin() + pos.z * rot_y.cos(),
-        );
+
+        pos = pos.rotate_y(rot_y);
+
+        let dir = pos.normalize();
+        let current_pitch = dir.y.clamp(-1.0, 1.0).asin();
+        let max_pitch = std::f32::consts::FRAC_PI_2 - 30.0_f32.to_radians();
+        let min_pitch = -max_pitch;
+        let target_pitch = (current_pitch - rot_x).clamp(min_pitch, max_pitch);
+        let clamped_rot_x = current_pitch - target_pitch;
+        pos = pos.rotate_axis(camera.right, clamped_rot_x);
+
         camera.origin = pos + camera.target;
 
         camera.update();
