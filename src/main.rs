@@ -3,34 +3,20 @@ pub mod vec3simd;
 use std::time::SystemTime;
 
 use glam::{Vec3, vec3};
-use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
 use wide::{f32x16, i32x16, u32x16};
 
-use crate::vec3simd::Vec3Simd;
+#[cfg(all(target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+
+use crate::vec3simd::{IVec3Simd, Vec3Simd};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
 
-fn hit_sphere(
-    center: Vec3Simd,
-    radius: f32x16,
-    ray_origin: Vec3Simd,
-    ray_direction: Vec3Simd,
-) -> f32x16 {
-    let oc = center - ray_origin;
+const MAX_ITERATONS: usize = 100;
 
-    let a = ray_direction.length_squared();
-    let h = ray_direction.dot(oc);
-    let c = oc.length_squared() - radius * radius;
-    let discriminant = h * h - a * c;
-
-    discriminant
-        .is_sign_negative()
-        .bitselect(f32x16::splat(-1.0), (h - discriminant.sqrt()) / a)
-}
-
-#[allow(unused)]
-fn hit_cube(
+fn hit_aabb(
     min: Vec3Simd,
     max: Vec3Simd,
     ray_origin: Vec3Simd,
@@ -45,45 +31,60 @@ fn hit_cube(
         let t1 = (min.component(i) - ray_origin_componenent) * dir_inv_component;
         let t2 = (max.component(i) - ray_origin_componenent) * dir_inv_component;
 
-        tmin = tmin.max(t1.min(t2)); // max(tmin, min(t1, t2)));
-        tmax = tmax.min(t1.max(t2)); // min(tmax, max(t1, t2)));
+        tmin = tmin.max(t1.min(t2)); // max(tmin, min(t1, t2));
+        tmax = tmax.min(t1.max(t2)); // min(tmax, max(t1, t2));
     }
 
     (tmin, tmax)
 }
 
-fn hit_cube_with_normal(
-    min: Vec3Simd,
-    max: Vec3Simd,
-    ray_origin: Vec3Simd,
-    inv_ray_direction: Vec3Simd,
-) -> (f32x16, f32x16, i32x16) {
-    // Use NEG_INFINITY so the first valid t_near always wins an axis
-    let mut tmin = f32x16::splat(f32::NEG_INFINITY);
-    let mut tmax = f32x16::splat(f32::MAX);
-    let mut hit_axis = i32x16::splat(0);
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn gather_u32x16_avx2(data: &[u32], indices: u32x16, mask: u32x16) -> u32x16 {
+    unsafe {
+        // Reinterpret the 16-lane vectors as pairs of 256-bit AVX2 registers
+        let [idx_lo, idx_hi]: [__m256i; 2] = bytemuck::cast(indices);
+        let [mask_lo, mask_hi]: [__m256i; 2] = bytemuck::cast(mask);
 
-    for i in 0..3 {
-        let ray_origin_componenent = ray_origin.component(i);
-        let dir_inv_component = inv_ray_direction.component(i);
-        let t1 = (min.component(i) - ray_origin_componenent) * dir_inv_component;
-        let t2 = (max.component(i) - ray_origin_componenent) * dir_inv_component;
+        let fallback = _mm256_setzero_si256();
+        let base_ptr = data.as_ptr() as *const i32;
 
-        let t_near = t1.min(t2);
-        let t_far = t1.max(t2);
+        // Gather lower 8 lanes and upper 8 lanes (SCALE = 4 bytes per u32)
+        let res_lo = _mm256_mask_i32gather_epi32::<4>(fallback, base_ptr, idx_lo, mask_lo);
+        let res_hi = _mm256_mask_i32gather_epi32::<4>(fallback, base_ptr, idx_hi, mask_hi);
 
-        // Identify lanes where this axis becomes the new latest entry
-        let is_new_max = t_near.simd_gt(tmin);
-
-        tmin = is_new_max.select(t_near, tmin);
-        hit_axis = is_new_max.select(i32x16::splat(i as i32), hit_axis);
-        tmax = tmax.min(t_far);
+        return bytemuck::cast([res_lo, res_hi]);
     }
+}
 
-    // Clamp tmin to 0.0 after axis tracking so forward-hit checks stay identical
-    tmin = tmin.max(f32x16::splat(0.0));
+#[inline(always)]
+fn gather_u32x16_scalar(data: &[u32], indices: u32x16, mask: u32x16) -> u32x16 {
+    // Portable scalar fallback for non-AVX2 targets (ARM NEON, SSE, etc.)
+    let idx_arr = indices.as_array();
+    let mask_arr = mask.as_array();
+    let mut out = [0u32; 16];
 
-    (tmin, tmax, hit_axis)
+    for lane in 0..16 {
+        if mask_arr[lane] != 0 {
+            out[lane] = data[idx_arr[lane] as usize];
+        }
+    }
+    u32x16::new(out)
+}
+
+#[inline(always)]
+fn gather_u32x16<const USE_AVX2: bool>(data: &[u32], indices: u32x16, mask: u32x16) -> u32x16 {
+    if USE_AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            gather_u32x16_avx2(data, indices, mask)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        unreachable!()
+    } else {
+        gather_u32x16_scalar(data, indices, mask)
+    }
 }
 
 #[derive(Debug)]
@@ -147,6 +148,8 @@ impl Camera {
 fn main() {
     let mut buffer = vec![0u32; WIDTH * HEIGHT];
 
+    let use_avx2: bool = std::is_x86_feature_detected!("avx2");
+
     let mut window = Window::new(
         "Toy Voxel Engine",
         WIDTH,
@@ -164,39 +167,71 @@ fn main() {
 
     let mut time_since_last_fps = SystemTime::now();
 
+    let mut heat_overlay = false;
+
     let mut camera = Camera::new(
-        vec3(0.0, 0.0, 1.0),
-        vec3(0.0, 0.0, 0.0),
+        vec3(-2.0, 3.0, -2.0),
+        vec3(4.0, 4.0, 4.0),
         90.0_f32.to_radians(),
         WIDTH as f32 / HEIGHT as f32,
     );
 
     let background_color = Vec3Simd::from(vec3(0.5, 0.7, 1.0));
 
-    let sphere_center = Vec3Simd::from(vec3(-0.5, 0.0, 0.0));
-    let sphere_radius = f32x16::splat(0.5);
-
-    let cube_center = Vec3Simd::from(vec3(0.5, 0.0, 0.0));
-    let cube_min = cube_center + Vec3Simd::from(vec3(-0.33, -0.33, -0.33));
-    let cube_max = cube_center + Vec3Simd::from(vec3(0.33, 0.33, 0.33));
+    const VOLUME_EDGE: i32 = 8;
+    let volume_center = Vec3Simd::from(vec3(0.0, 0.0, 0.0));
+    let volume_min = volume_center + Vec3Simd::from(vec3(0.0, 0.0, 0.0));
+    let volume_max = volume_center
+        + Vec3Simd::from(vec3(
+            VOLUME_EDGE as f32,
+            VOLUME_EDGE as f32,
+            VOLUME_EDGE as f32,
+        ));
+    let mut volume: [u32; VOLUME_EDGE.pow(3) as usize] = [0; VOLUME_EDGE.pow(3) as usize]; // 4x4x4 volume
+    for i in 0..VOLUME_EDGE {
+        for j in 0..VOLUME_EDGE {
+            for k in 0..VOLUME_EDGE {
+                let local_coord = Vec3::new(i as f32, j as f32, k as f32) + 0.5;
+                let centered_coord = local_coord - (VOLUME_EDGE / 2) as f32;
+                if centered_coord.length() < (VOLUME_EDGE / 2) as f32 {
+                    volume[(i * VOLUME_EDGE.pow(2) + j * VOLUME_EDGE + k) as usize] = u32::MAX;
+                }
+            }
+        }
+    }
 
     let local_x = i32x16::new([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
     let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        window
+            .get_keys_pressed(KeyRepeat::No)
+            .iter()
+            .for_each(|key| match key {
+                // Miscs
+                Key::F1 => heat_overlay = !heat_overlay,
+                _ => (),
+            });
+        {}
+
         let mut rot_y = 0.0f32;
         let mut fwd = 0.0f32;
         let mut rot_x = 0.0f32;
 
         window.get_keys().iter().for_each(|key| match key {
-            Key::W => fwd += 0.01,
-            Key::S => fwd -= 0.01,
+            // Camera controls
+            Key::W => fwd += 0.1,
+            Key::S => fwd -= 0.1,
             Key::A => rot_y -= 0.1,
             Key::D => rot_y += 0.1,
             Key::Space => rot_x -= 0.1,
             Key::LeftShift => rot_x += 0.1,
             _ => (),
         });
+
+        if let Some(scroll) = window.get_scroll_wheel() {
+            fwd += scroll.1 / 12.0;
+        }
 
         // Move camera along its forward axis
         camera.origin += camera.forward * fwd;
@@ -218,6 +253,13 @@ fn main() {
 
         camera.update();
 
+        let patches_to_dbg = vec![
+            // 1 / 4
+            // (WIDTH / 16, HEIGHT / 16),
+            // 1 / 2
+            // (WIDTH / 8, HEIGHT / 8),
+        ];
+
         // Process image in blocks of 4x4 pixels
         for chunk_y in 0..(HEIGHT / 4) {
             for chunk_x in 0..(WIDTH / 4) {
@@ -226,6 +268,8 @@ fn main() {
 
                 let x_f32 = f32x16::from_i32x16(x);
                 let y_f32 = f32x16::from_i32x16(y);
+
+                let to_dbg = patches_to_dbg.contains(&(chunk_x, chunk_y));
 
                 let pixel_center = Vec3Simd::from(camera.pixel00_loc)
                     + x_f32 * Vec3Simd::from(camera.pixel_delta_u)
@@ -238,44 +282,174 @@ fn main() {
 
                 let mut color = (1.0 - grad) * 1.0 + grad * background_color;
 
-                let mut closest_t = f32x16::splat(f32::MAX);
-
-                // Sphere
-                let t = hit_sphere(
-                    sphere_center,
-                    sphere_radius,
-                    Vec3Simd::from(camera.origin),
-                    ray_direction,
-                );
-                let sphere_hit_normal =
-                    (Vec3Simd::from(camera.origin) + ray_direction * t - sphere_center).normalize();
-                color = Vec3Simd::bitselect_scalar(
-                    t.is_sign_positive(),
-                    f32x16::splat(0.5) * (sphere_hit_normal + f32x16::splat(1.0)),
-                    color,
-                );
-
-                closest_t = t.is_sign_positive().bitselect(t, closest_t);
-
-                // Cube
-                let (tmin, tmax, hit_axis) = hit_cube_with_normal(
-                    cube_min,
-                    cube_max,
+                let (tmin, tmax) = hit_aabb(
+                    volume_min,
+                    volume_max,
                     Vec3Simd::from(camera.origin),
                     inv_ray_direction,
                 );
-                let cube_hit_normal = Vec3Simd::new(
-                    -ray_direction.x.signum() * hit_axis.simd_eq(i32x16::splat(0)).round_float(),
-                    -ray_direction.y.signum() * hit_axis.simd_eq(i32x16::splat(1)).round_float(),
-                    -ray_direction.z.signum() * hit_axis.simd_eq(i32x16::splat(2)).round_float(),
-                );
-                color = Vec3Simd::bitselect_scalar(
-                    tmin.simd_lt(closest_t) & tmin.simd_le(tmax) & tmax.is_sign_positive(),
-                    f32x16::splat(0.5) * (cube_hit_normal + f32x16::splat(1.0)),
-                    color,
+
+                // Volume
+                // let intersection_coord = Vec3Simd::from(camera.origin) + tmin * ray_direction;
+                // let mut voxel = IVec3Simd::from(intersection_coord.fast_trunc_int());
+
+                let mut voxel = IVec3Simd::from(camera.origin.floor().as_ivec3());
+
+                // if to_dbg {
+                //     dbg!(tmin, tmax);
+                //     dbg!(intersection_coord);
+                // }
+
+                let step = ray_direction.signum().fast_round_int();
+
+                let t_delta = Vec3Simd::new(
+                    ray_direction
+                        .x
+                        .simd_ne(0.0)
+                        .select((1.0 / ray_direction.x).abs(), f32x16::splat(1e30f32)),
+                    ray_direction
+                        .y
+                        .simd_ne(0.0)
+                        .select((1.0 / ray_direction.y).abs(), f32x16::splat(1e30f32)),
+                    ray_direction
+                        .z
+                        .simd_ne(0.0)
+                        .select((1.0 / ray_direction.z).abs(), f32x16::splat(1e30f32)),
                 );
 
-                color.clamp_scalar(f32x16::splat(0.0), f32x16::splat(1.0));
+                let mut t_max = Vec3Simd::new(
+                    ray_direction.x.is_sign_positive().select(
+                        ((voxel.x + 1).round_float() - camera.origin.x) * t_delta.x,
+                        (camera.origin.x - voxel.x.round_float()) * t_delta.x,
+                    ),
+                    ray_direction.y.is_sign_positive().select(
+                        ((voxel.y + 1).round_float() - camera.origin.y) * t_delta.y,
+                        (camera.origin.y - voxel.y.round_float()) * t_delta.y,
+                    ),
+                    ray_direction.z.is_sign_positive().select(
+                        ((voxel.z + 1).round_float() - camera.origin.z) * t_delta.z,
+                        (camera.origin.z - voxel.z.round_float()) * t_delta.z,
+                    ),
+                );
+
+                // if to_dbg {
+                //     dbg!(voxel, step, t_delta, t_max);
+                // }
+
+                let mut active_mask =
+                    bytemuck::cast::<f32x16, i32x16>(tmin.simd_le(tmax) & tmax.is_sign_positive());
+                // let mut active_mask = i32x16::splat(-1);
+                let mut hit_data = u32x16::splat(0);
+                // let mut t = f32x16::splat(0.0);
+
+                let mut i = 0;
+                let mut iterations = i32x16::splat(0);
+                while i < MAX_ITERATONS {
+                    // active_mask &= in_bounds;
+
+                    let indices = voxel.x
+                        + voxel.y * i32x16::splat(VOLUME_EDGE)
+                        + voxel.z * i32x16::splat(VOLUME_EDGE.pow(2));
+
+                    let in_volume_bounds = voxel.x.simd_ge(0)
+                        & voxel.x.simd_lt(VOLUME_EDGE)
+                        & voxel.y.simd_ge(0)
+                        & voxel.y.simd_lt(VOLUME_EDGE)
+                        & voxel.z.simd_ge(0)
+                        & voxel.z.simd_lt(VOLUME_EDGE);
+
+                    let sampled = if use_avx2 {
+                        gather_u32x16::<true>(
+                            &volume,
+                            bytemuck::cast(indices),
+                            bytemuck::cast(in_volume_bounds & active_mask),
+                        )
+                    } else {
+                        gather_u32x16::<false>(
+                            &volume,
+                            bytemuck::cast(indices),
+                            bytemuck::cast(in_volume_bounds & active_mask),
+                        )
+                    };
+
+                    let hit_mask =
+                        bytemuck::cast::<u32x16, i32x16>(sampled).simd_ne(0) & active_mask;
+
+                    if hit_mask.any() {
+                        hit_data =
+                            bytemuck::cast::<i32x16, u32x16>(hit_mask).select(sampled, hit_data);
+                        // Stop advancing rays that hit a solid voxel
+                        active_mask &= !hit_mask;
+                    }
+
+                    if to_dbg {
+                        dbg!(voxel);
+                        // dbg!(in_bounds);
+                        dbg!(active_mask, indices, sampled, hit_mask, hit_data);
+                    }
+
+                    if active_mask.none() {
+                        break;
+                    }
+
+                    let mask_x = t_max.x.simd_lt(t_max.y) & t_max.x.simd_lt(t_max.z);
+                    let mask_y = !mask_x & t_max.y.simd_lt(t_max.z);
+                    let mask_z = !mask_x & !mask_y;
+
+                    // if to_dbg {
+                    //     dbg!(mask_x, mask_y, mask_z);
+                    // }
+
+                    voxel.x =
+                        bytemuck::cast::<f32x16, i32x16>(mask_x).select(voxel.x + step.x, voxel.x);
+                    // t = mask_x.select(t_max.x, t);
+                    t_max.x = mask_x.select(t_max.x + t_delta.x, t_max.x);
+
+                    voxel.y =
+                        bytemuck::cast::<f32x16, i32x16>(mask_y).select(voxel.y + step.y, voxel.y);
+                    // t = mask_y.select(t_max.y, t);
+                    t_max.y = mask_y.select(t_max.y + t_delta.y, t_max.y);
+
+                    voxel.z =
+                        bytemuck::cast::<f32x16, i32x16>(mask_z).select(voxel.z + step.z, voxel.z);
+                    // t = mask_z.select(t_max.z, t);
+                    t_max.z = mask_z.select(t_max.z + t_delta.z, t_max.z);
+
+                    i += 1;
+                    iterations = active_mask.simd_ne(0).select(iterations + 1, iterations);
+                }
+
+                if to_dbg {
+                    dbg!(iterations);
+                }
+
+                let hit_mask = hit_data.simd_ne(0);
+
+                let hit_color_r: u32x16 = (hit_data & (255 << 16)) >> 16; // 0R00
+                let hit_color_g: u32x16 = (hit_data & (255 << 8)) >> 8; // 00G0
+                let hit_color_b: u32x16 = hit_data & 255; // 000B
+
+                let hit_color = Vec3Simd::new(
+                    hit_color_r.cast_signed().round_float() / 255.0f32,
+                    hit_color_g.cast_signed().round_float() / 255.0f32,
+                    hit_color_b.cast_signed().round_float() / 255.0f32,
+                );
+
+                color = Vec3Simd::select_scalar(bytemuck::cast(hit_mask), hit_color, color);
+
+                if heat_overlay {
+                    let heat_color = Vec3Simd::new(
+                        iterations.round_float() / 100 as f32,
+                        f32x16::ZERO,
+                        f32x16::ZERO,
+                    );
+
+                    // Alpha blend "heat" (number of iterations per ray) with background
+                    let alpha = 0.3f32;
+                    let blend_color =
+                        f32x16::splat(alpha) * heat_color + (1.0 - f32x16::splat(alpha)) * color;
+                    color = Vec3Simd::select_scalar(bytemuck::cast(hit_mask), blend_color, color);
+                }
 
                 let color_r_int: u32x16 = bytemuck::cast((color.x * 255.0f32).fast_round_int());
                 let color_g_int: u32x16 = bytemuck::cast((color.y * 255.0f32).fast_round_int());
@@ -301,5 +475,7 @@ fn main() {
             println!("fps: {}", window.get_fps());
             time_since_last_fps = SystemTime::now();
         }
+
+        // break;
     }
 }
