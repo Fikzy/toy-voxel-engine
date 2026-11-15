@@ -13,6 +13,7 @@ use crate::vec3simd::{IVec3Simd, Vec3Simd};
 
 const WIDTH: usize = 320;
 const HEIGHT: usize = 180;
+const SCALE: Scale = Scale::X4;
 
 const MAX_ITERATONS: usize = 100;
 
@@ -157,7 +158,7 @@ fn main() {
         WindowOptions {
             resize: false,
             scale_mode: ScaleMode::Stretch,
-            scale: Scale::X4,
+            scale: SCALE,
             ..WindowOptions::default()
         },
     )
@@ -165,7 +166,8 @@ fn main() {
 
     window.set_target_fps(60);
 
-    let mut time_since_last_fps = SystemTime::now();
+    let mut time_since_last_metrics = SystemTime::now();
+    let mut average_frame_time = 0.0f64;
 
     let mut heat_overlay = false;
 
@@ -193,7 +195,7 @@ fn main() {
             for k in 0..VOLUME_EDGE {
                 let local_coord = Vec3::new(i as f32, j as f32, k as f32) + 0.5;
                 let centered_coord = local_coord - (VOLUME_EDGE / 2) as f32;
-                if centered_coord.length() < (VOLUME_EDGE / 2) as f32 {
+                if centered_coord.length() >= (VOLUME_EDGE / 2) as f32 {
                     volume[(i * VOLUME_EDGE.pow(2) + j * VOLUME_EDGE + k) as usize] = u32::MAX;
                 }
             }
@@ -204,6 +206,8 @@ fn main() {
     let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        let frame_start = SystemTime::now();
+
         window
             .get_keys_pressed(KeyRepeat::No)
             .iter()
@@ -469,11 +473,19 @@ fn main() {
             }
         }
 
+        // Exponential Moving Average frame time
+        average_frame_time +=
+            (frame_start.elapsed().unwrap().as_millis() as f64 - average_frame_time) as f64 * 0.03;
+
         window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
 
-        if time_since_last_fps.elapsed().unwrap().as_millis() >= 1000 {
-            println!("fps: {}", window.get_fps());
-            time_since_last_fps = SystemTime::now();
+        if time_since_last_metrics.elapsed().unwrap().as_millis() >= 1000 {
+            println!(
+                "fps: {:>3}, frame: {:.3}ms",
+                window.get_fps(),
+                average_frame_time
+            );
+            time_since_last_metrics = SystemTime::now();
         }
 
         // break;
