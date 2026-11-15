@@ -2,7 +2,7 @@ pub mod vec3simd;
 
 use std::time::SystemTime;
 
-use glam::{Vec3, vec3};
+use glam::{IVec3, Vec3, vec3};
 use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
 use wide::{f32x16, i32x16, u32x16};
 
@@ -202,6 +202,10 @@ fn main() {
         }
     }
 
+    let dir_light_start = vec3(2.0, 2.0, 2.0);
+    let dir_light_end = vec3(1.0, 1.0, 1.0);
+    let light_dir = (dir_light_end - dir_light_start).normalize();
+
     let local_x = i32x16::new([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
     let local_y = i32x16::new([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
 
@@ -286,6 +290,7 @@ fn main() {
 
                 let mut color = (1.0 - grad) * 1.0 + grad * background_color;
 
+                // Volume
                 let (tmin, tmax) = hit_aabb(
                     volume_min,
                     volume_max,
@@ -293,7 +298,8 @@ fn main() {
                     inv_ray_direction,
                 );
 
-                // Volume
+                let t_entry = Vec3Simd::from(camera.origin) + tmin * ray_direction;
+
                 // let intersection_coord = Vec3Simd::from(camera.origin) + tmin * ray_direction;
                 // let mut voxel = IVec3Simd::from(intersection_coord.fast_trunc_int());
 
@@ -345,6 +351,14 @@ fn main() {
                 // let mut active_mask = i32x16::splat(-1);
                 let mut hit_data = u32x16::splat(0);
                 // let mut t = f32x16::splat(0.0);
+                let mut hit_normal = IVec3Simd::from(IVec3::ZERO);
+
+                let mut last_step_x = bytemuck::cast::<f32x16, i32x16>(
+                    t_entry.x.simd_ge(t_entry.y) & t_entry.x.simd_ge(t_entry.z),
+                );
+                let mut last_step_y =
+                    !last_step_x & bytemuck::cast::<f32x16, i32x16>(t_entry.y.simd_ge(t_entry.z));
+                let mut last_step_z = !last_step_x & !last_step_y;
 
                 let mut i = 0;
                 let mut iterations = i32x16::splat(0);
@@ -400,23 +414,21 @@ fn main() {
                     let mask_y = !mask_x & t_max.y.simd_lt(t_max.z);
                     let mask_z = !mask_x & !mask_y;
 
+                    let i_mask_x = bytemuck::cast::<f32x16, i32x16>(mask_x);
+                    let i_mask_y = bytemuck::cast::<f32x16, i32x16>(mask_y);
+                    let i_mask_z = bytemuck::cast::<f32x16, i32x16>(mask_z);
+
                     // if to_dbg {
                     //     dbg!(mask_x, mask_y, mask_z);
                     // }
 
-                    voxel.x =
-                        bytemuck::cast::<f32x16, i32x16>(mask_x).select(voxel.x + step.x, voxel.x);
-                    // t = mask_x.select(t_max.x, t);
+                    voxel.x = i_mask_x.select(voxel.x + step.x, voxel.x);
                     t_max.x = mask_x.select(t_max.x + t_delta.x, t_max.x);
 
-                    voxel.y =
-                        bytemuck::cast::<f32x16, i32x16>(mask_y).select(voxel.y + step.y, voxel.y);
-                    // t = mask_y.select(t_max.y, t);
+                    voxel.y = i_mask_y.select(voxel.y + step.y, voxel.y);
                     t_max.y = mask_y.select(t_max.y + t_delta.y, t_max.y);
 
-                    voxel.z =
-                        bytemuck::cast::<f32x16, i32x16>(mask_z).select(voxel.z + step.z, voxel.z);
-                    // t = mask_z.select(t_max.z, t);
+                    voxel.z = i_mask_z.select(voxel.z + step.z, voxel.z);
                     t_max.z = mask_z.select(t_max.z + t_delta.z, t_max.z);
 
                     i += 1;
@@ -426,6 +438,12 @@ fn main() {
                 if to_dbg {
                     dbg!(iterations);
                 }
+
+                let hit_normal = Vec3Simd::new(
+                    last_step_x.select(-step.x, i32x16::splat(0)).round_float(),
+                    last_step_y.select(-step.y, i32x16::splat(0)).round_float(),
+                    last_step_z.select(-step.z, i32x16::splat(0)).round_float(),
+                );
 
                 let hit_mask = hit_data.simd_ne(0);
 
@@ -438,6 +456,10 @@ fn main() {
                     hit_color_g.cast_signed().round_float() / 255.0f32,
                     hit_color_b.cast_signed().round_float() / 255.0f32,
                 );
+
+                let diffuse = hit_normal
+                    .dot(Vec3Simd::from(light_dir))
+                    .max(f32x16::splat(0.0));
 
                 color = Vec3Simd::select_scalar(bytemuck::cast(hit_mask), hit_color, color);
 
