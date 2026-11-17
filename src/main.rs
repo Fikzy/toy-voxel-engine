@@ -2,8 +2,8 @@ pub mod vec3simd;
 
 use std::time::SystemTime;
 
-use glam::{Vec3, vec3};
-use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
+use glam::{Vec2, Vec3, vec3};
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, ScaleMode, Window, WindowOptions};
 use wide::{f32x16, i32x16, u32x16};
 
 #[cfg(all(target_arch = "x86_64"))]
@@ -171,10 +171,20 @@ fn main() {
 
     window.set_target_fps(60);
 
+    let mut mouse_pos = window
+        .get_mouse_pos(MouseMode::Pass)
+        .map_or_default(|pos| Vec2::from(pos));
+    let mut mouse_pos_delta = Vec2::ZERO;
+
     let mut time_since_last_metrics = SystemTime::now();
     let mut average_frame_time = 0.0f64;
 
     let mut heat_overlay = false;
+
+    const MOVEMENT_SPEED: f32 = 0.2;
+    const SCROLL_MOVEMENT_SPEED: f32 = 1.0;
+    const ROTATION_SPEED: f32 = 0.1;
+    const MOUSE_SENSITIVITY: f32 = 0.2;
 
     let mut camera = Camera::new(
         vec3(-2.0, 3.0, -2.0),
@@ -221,38 +231,51 @@ fn main() {
             });
         {}
 
-        let mut rot_y = 0.0f32;
-        let mut fwd = 0.0f32;
-        let mut rot_x = 0.0f32;
+        let mut rotation = Vec2::ZERO;
+        let mut forward_translation = Vec3::ZERO;
 
         window.get_keys().iter().for_each(|key| match key {
             // Camera controls
-            Key::W => fwd += 0.1,
-            Key::S => fwd -= 0.1,
-            Key::A => rot_y -= 0.1,
-            Key::D => rot_y += 0.1,
-            Key::Space => rot_x -= 0.1,
-            Key::LeftShift => rot_x += 0.1,
+            Key::W => forward_translation += MOVEMENT_SPEED,
+            Key::S => forward_translation -= MOVEMENT_SPEED,
+            Key::A => rotation.y -= ROTATION_SPEED,
+            Key::D => rotation.y += ROTATION_SPEED,
+            Key::Space => rotation.x -= ROTATION_SPEED,
+            Key::LeftShift => rotation.x += ROTATION_SPEED,
             _ => (),
         });
 
         if let Some(scroll) = window.get_scroll_wheel() {
-            fwd += scroll.1 / 12.0;
+            forward_translation += scroll.1 / 12.0 * SCROLL_MOVEMENT_SPEED;
+        }
+
+        if let Some(pos) = window.get_mouse_pos(MouseMode::Pass) {
+            let p = Vec2::from(pos);
+            mouse_pos_delta = mouse_pos - p;
+            mouse_pos = p;
+        }
+
+        if window.get_mouse_down(MouseButton::Left) {
+            rotation.y += mouse_pos_delta.x * MOUSE_SENSITIVITY * ROTATION_SPEED;
+            rotation.x += mouse_pos_delta.y * MOUSE_SENSITIVITY * ROTATION_SPEED;
         }
 
         // Move camera along its forward axis
-        camera.origin += camera.forward * fwd;
+        camera.origin += camera.forward * forward_translation;
+        if camera.origin.distance(camera.target) < 1.0 {
+            camera.origin = camera.target - camera.forward * 1.0;
+        }
 
         // Rotate camera around target
         let mut pos = camera.origin - camera.target;
 
-        pos = pos.rotate_y(rot_y);
+        pos = pos.rotate_y(rotation.y);
 
         let dir = pos.normalize();
         let current_pitch = dir.y.clamp(-1.0, 1.0).asin();
         let max_pitch = std::f32::consts::FRAC_PI_2 - 30.0_f32.to_radians();
         let min_pitch = -max_pitch;
-        let target_pitch = (current_pitch - rot_x).clamp(min_pitch, max_pitch);
+        let target_pitch = (current_pitch - rotation.x).clamp(min_pitch, max_pitch);
         let clamped_rot_x = current_pitch - target_pitch;
         pos = pos.rotate_axis(camera.right, clamped_rot_x);
 
