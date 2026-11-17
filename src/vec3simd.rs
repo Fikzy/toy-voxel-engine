@@ -4,7 +4,7 @@ use wide::{f32x16, i32x16, u32x16};
 
 macro_rules! impl_vec3_simd_base {
     ($struct_name:ident, $simd_ty:ty, $glam_ty:ty) => {
-        #[derive(Clone, Copy, Debug)]
+        #[derive(Clone, Copy, Debug, Default)]
         pub struct $struct_name {
             pub x: $simd_ty,
             pub y: $simd_ty,
@@ -47,6 +47,16 @@ macro_rules! impl_vec3_simd_base {
                     0 => self.x,
                     1 => self.y,
                     2 => self.z,
+                    _ => panic!("Out of bounds"),
+                }
+            }
+
+            #[inline]
+            pub fn set_component(&mut self, i: usize, elem: $simd_ty) {
+                match i {
+                    0 => self.x = elem,
+                    1 => self.y = elem,
+                    2 => self.z = elem,
                     _ => panic!("Out of bounds"),
                 }
             }
