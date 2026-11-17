@@ -188,7 +188,7 @@ fn main() {
 
     let mut camera = Camera::new(
         vec3(-2.0, 3.0, -2.0),
-        vec3(4.0, 4.0, 4.0),
+        vec3(0.0, 0.0, 0.0),
         90.0_f32.to_radians(),
         WIDTH as f32 / HEIGHT as f32,
     );
@@ -198,17 +198,17 @@ fn main() {
     let light_dir = vec3(-1.0, 1.0, -1.0).normalize();
     let light_color = vec3(1.0, 1.0, 1.0);
 
-    const VOLUME_EDGE: i32 = 8;
+    const VOLUME_EDGE: i32 = 32;
     let volume_center = vec3(0.0, 0.0, 0.0);
-    let volume_min = volume_center + vec3(0.0, 0.0, 0.0);
-    let volume_max = volume_center + VOLUME_EDGE as f32;
+    let volume_min = volume_center - (VOLUME_EDGE / 2) as f32;
+    let volume_max = volume_center + (VOLUME_EDGE / 2) as f32;
     let mut volume: [u32; VOLUME_EDGE.pow(3) as usize] = [0; VOLUME_EDGE.pow(3) as usize]; // 4x4x4 volume
     for i in 0..VOLUME_EDGE {
         for j in 0..VOLUME_EDGE {
             for k in 0..VOLUME_EDGE {
                 let local_coord = Vec3::new(i as f32, j as f32, k as f32) + 0.5;
                 let centered_coord = local_coord - (VOLUME_EDGE / 2) as f32;
-                if centered_coord.length() >= (VOLUME_EDGE / 2) as f32 {
+                if centered_coord.length() < (VOLUME_EDGE / 2) as f32 {
                     volume[(i * VOLUME_EDGE.pow(2) + j * VOLUME_EDGE + k) as usize] = u32::MAX;
                 }
             }
@@ -379,18 +379,18 @@ fn main() {
                 let mut i = 0;
                 let mut iterations = i32x16::splat(0);
                 while i < MAX_ITERATONS {
-                    // active_mask &= in_bounds;
+                    let local_coord = voxel - IVec3Simd::from(volume_min.as_ivec3());
 
-                    let indices = voxel.x
-                        + voxel.y * i32x16::splat(VOLUME_EDGE)
-                        + voxel.z * i32x16::splat(VOLUME_EDGE.pow(2));
+                    let indices = local_coord.x
+                        + local_coord.y * i32x16::splat(VOLUME_EDGE)
+                        + local_coord.z * i32x16::splat(VOLUME_EDGE.pow(2));
 
-                    let in_volume_bounds = voxel.x.simd_ge(0)
-                        & voxel.x.simd_lt(VOLUME_EDGE)
-                        & voxel.y.simd_ge(0)
-                        & voxel.y.simd_lt(VOLUME_EDGE)
-                        & voxel.z.simd_ge(0)
-                        & voxel.z.simd_lt(VOLUME_EDGE);
+                    let in_volume_bounds = local_coord.x.simd_ge(0)
+                        & local_coord.x.simd_lt(VOLUME_EDGE)
+                        & local_coord.y.simd_ge(0)
+                        & local_coord.y.simd_lt(VOLUME_EDGE)
+                        & local_coord.z.simd_ge(0)
+                        & local_coord.z.simd_lt(VOLUME_EDGE);
 
                     let sampled = if use_avx2 {
                         gather_u32x16::<true>(
