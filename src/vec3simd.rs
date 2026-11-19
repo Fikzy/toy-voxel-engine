@@ -176,6 +176,11 @@ macro_rules! impl_vec3_simd_float {
             }
 
             #[inline]
+            pub fn floor(self) -> $struct_name {
+                $struct_name::new(self.x.floor(), self.y.floor(), self.z.floor())
+            }
+
+            #[inline]
             pub fn fast_round_int(self) -> IVec3Simd {
                 IVec3Simd::new(
                     self.x.fast_round_int(),

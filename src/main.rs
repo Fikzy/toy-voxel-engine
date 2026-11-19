@@ -198,17 +198,20 @@ fn main() {
     let light_dir = vec3(-1.0, 1.0, -1.0).normalize();
     let light_color = vec3(1.0, 1.0, 1.0);
 
+    const VOXEL_SIZE: f32 = 1.0 / 8.0;
+    const INV_VOXEL_SIZE: f32 = 1.0 / VOXEL_SIZE;
+
     const VOLUME_EDGE: i32 = 32;
     let volume_center = vec3(0.0, 0.0, 0.0);
-    let volume_min = volume_center - (VOLUME_EDGE / 2) as f32;
-    let volume_max = volume_center + (VOLUME_EDGE / 2) as f32;
+    let volume_min = volume_center - (VOLUME_EDGE / 2) as f32 * VOXEL_SIZE;
+    let volume_max = volume_center + (VOLUME_EDGE / 2) as f32 * VOXEL_SIZE;
     let mut volume: [u32; VOLUME_EDGE.pow(3) as usize] = [0; VOLUME_EDGE.pow(3) as usize]; // 4x4x4 volume
     for i in 0..VOLUME_EDGE {
         for j in 0..VOLUME_EDGE {
             for k in 0..VOLUME_EDGE {
                 let local_coord = Vec3::new(i as f32, j as f32, k as f32) + 0.5;
                 let centered_coord = local_coord - (VOLUME_EDGE / 2) as f32;
-                if centered_coord.length() < (VOLUME_EDGE / 2) as f32 {
+                if centered_coord.length() >= (VOLUME_EDGE / 2) as f32 {
                     volume[(i * VOLUME_EDGE.pow(2) + j * VOLUME_EDGE + k) as usize] = u32::MAX;
                 }
             }
@@ -328,7 +331,10 @@ fn main() {
                     !last_step_x & bytemuck::cast::<f32x16, i32x16>(tnear.y.simd_ge(tnear.z));
                 let mut last_step_z = !last_step_x & !last_step_y;
 
-                let mut voxel = IVec3Simd::from(camera.origin.floor().as_ivec3());
+                let grid_origin = camera.origin * INV_VOXEL_SIZE;
+                let grid_min = (volume_min * INV_VOXEL_SIZE).round();
+
+                let mut voxel = IVec3Simd::from(grid_origin.floor().as_ivec3());
 
                 // if to_dbg {
                 //     dbg!(tmin, tmax);
@@ -354,16 +360,16 @@ fn main() {
 
                 let mut t_max = Vec3Simd::new(
                     ray_direction.x.is_sign_positive().select(
-                        ((voxel.x + 1).round_float() - camera.origin.x) * t_delta.x,
-                        (camera.origin.x - voxel.x.round_float()) * t_delta.x,
+                        ((voxel.x + 1).round_float() - grid_origin.x) * t_delta.x,
+                        (grid_origin.x - voxel.x.round_float()) * t_delta.x,
                     ),
                     ray_direction.y.is_sign_positive().select(
-                        ((voxel.y + 1).round_float() - camera.origin.y) * t_delta.y,
-                        (camera.origin.y - voxel.y.round_float()) * t_delta.y,
+                        ((voxel.y + 1).round_float() - grid_origin.y) * t_delta.y,
+                        (grid_origin.y - voxel.y.round_float()) * t_delta.y,
                     ),
                     ray_direction.z.is_sign_positive().select(
-                        ((voxel.z + 1).round_float() - camera.origin.z) * t_delta.z,
-                        (camera.origin.z - voxel.z.round_float()) * t_delta.z,
+                        ((voxel.z + 1).round_float() - grid_origin.z) * t_delta.z,
+                        (grid_origin.z - voxel.z.round_float()) * t_delta.z,
                     ),
                 );
 
@@ -379,7 +385,7 @@ fn main() {
                 let mut i = 0;
                 let mut iterations = i32x16::splat(0);
                 while i < MAX_ITERATONS {
-                    let local_coord = voxel - IVec3Simd::from(volume_min.as_ivec3());
+                    let local_coord = voxel - IVec3Simd::from(grid_min.as_ivec3());
 
                     let indices = local_coord.x
                         + local_coord.y * i32x16::splat(VOLUME_EDGE)
